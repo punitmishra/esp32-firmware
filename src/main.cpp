@@ -44,7 +44,9 @@
 #define NETWORK_DNS         "8.8.8.8"
 
 // API Configuration
-#define API_HOST          "192.168.0.177"
+//   The Pi runs the Rust train-controller on :5000. Set a DHCP reservation
+//   on the router so this stays stable, or edit here and reflash.
+#define API_HOST          "192.168.0.165"
 #define API_PORT          5000
 #define API_UPDATE_INTERVAL 5000   // Send updates every 5 seconds
 #define WS_RECONNECT_INTERVAL 5000
@@ -54,6 +56,14 @@
 #define OLED_SCL 6
 #define LED_PIN 8
 #define BOOT_BTN 9
+
+// Building LED outputs — one 2N3904 driver per pin, drives a scenery LED.
+// Six pins free after the I²C + onboard LED + BOOT button. Order matters:
+// the index here is what /api/led/<n> addresses and must match the Pi API's
+// NODES[].buildings order.
+#define HOUSE_LED_COUNT 6
+const uint8_t HOUSE_PINS[HOUSE_LED_COUNT] = { 0, 1, 3, 4, 7, 10 };
+bool houseLedState[HOUSE_LED_COUNT] = { false, false, false, false, false, false };
 
 // OLED offsets for 72x40 visible area
 const int X = 30;
@@ -869,6 +879,9 @@ void setupWebServer() {
     doc["ble_clients"] = bleClientCount;
     doc["train_count"] = trainCount;
     doc["screen"] = currentScreen;
+    doc["led_count"] = HOUSE_LED_COUNT;
+    JsonArray leds = doc.createNestedArray("leds");
+    for (int i = 0; i < HOUSE_LED_COUNT; i++) leds.add(houseLedState[i]);
 
     String json;
     serializeJson(doc, json);
@@ -888,6 +901,49 @@ void setupWebServer() {
     String json;
     serializeJson(doc, json);
     server.send(200, "application/json", json);
+  });
+
+  // GET /api/led → report all 6 LED states
+  server.on("/api/led", HTTP_GET, []() {
+    StaticJsonDocument<128> d;
+    JsonArray a = d.createNestedArray("leds");
+    for (int i = 0; i < HOUSE_LED_COUNT; i++) a.add(houseLedState[i]);
+    String j; serializeJson(d, j);
+    server.send(200, "application/json", j);
+  });
+
+  // POST /api/led/<n>/<on|off> → drive one building LED.
+  // The ESP32 WebServer doesn't do path parameters out of the box, so we
+  // use server.onNotFound() as a one-line router for this URL family.
+  server.onNotFound([]() {
+    String uri = server.uri();
+    // Expect "/api/led/<n>/<state>"
+    if (!uri.startsWith("/api/led/")) {
+      server.send(404, "application/json", "{\"error\":\"not found\"}");
+      return;
+    }
+    int firstSlash = uri.indexOf('/', 9);
+    if (firstSlash < 0) {
+      server.send(400, "application/json", "{\"error\":\"expected /api/led/<n>/<state>\"}");
+      return;
+    }
+    int n = uri.substring(9, firstSlash).toInt();
+    String state = uri.substring(firstSlash + 1);
+    if (n < 0 || n >= HOUSE_LED_COUNT) {
+      server.send(400, "application/json", "{\"error\":\"led index out of range\"}");
+      return;
+    }
+    bool on;
+    if      (state == "on"  || state == "1" || state == "true")  on = true;
+    else if (state == "off" || state == "0" || state == "false") on = false;
+    else { server.send(400, "application/json", "{\"error\":\"state must be on|off\"}"); return; }
+    digitalWrite(HOUSE_PINS[n], on ? HIGH : LOW);
+    houseLedState[n] = on;
+    StaticJsonDocument<96> d;
+    d["led"] = n;
+    d["on"]  = on;
+    String j; serializeJson(d, j);
+    server.send(200, "application/json", j);
   });
 
   server.on("/reboot", HTTP_GET, []() {
@@ -1198,6 +1254,14 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
   pinMode(BOOT_BTN, INPUT_PULLUP);
+
+  // House LED drivers — 6 outputs per node, driven HIGH to light the LED
+  // via a 2N3904 low-side switch. All start off.
+  for (int i = 0; i < HOUSE_LED_COUNT; i++) {
+    pinMode(HOUSE_PINS[i], OUTPUT);
+    digitalWrite(HOUSE_PINS[i], LOW);
+    houseLedState[i] = false;
+  }
 
   setupOLED();
   setupWiFiAP();

@@ -1,450 +1,193 @@
 # RailCommand ESP32 Project Checkpoint
 
-**Date:** 2026-01-26
-**Status:** Working - 3-Node Multi-ESP32 System with real-time train, news, and weather updates
+**Date:** 2026-11-25
+**Status:** 3-node ESP32-C3 system — WiFi/OLED/BLE working, house LED drivers added, API_HOST now points at the Pi (Rust `train-controller` on :5000)
 
 ---
 
 ## Project Overview
 
-A model railroad control system using **3 ESP32-C3 microcontrollers** with OLED displays, connected to a Python Flask API server via WebSocket for real-time train status updates, live news from RSS feeds, and weather data. All nodes receive synchronized updates simultaneously.
+A model railroad control system where 3 ESP32-C3 SuperMini boards act as
+scenery zone controllers:
+- Each board has an SSD1306 OLED showing live train / schedule / weather / news
+- Each board drives 6 building LEDs (houses, beacons, signs) via 2N3904 drivers
+- All three boards speak to a Raspberry Pi running the Rust
+  `train-controller` API (see `github.com/punitmishra/pi-railroad-control`)
+
+The Pi is the brain; the ESP32s are the scenery edge.
 
 ---
 
-## Current State
+## Current state
 
-### Multi-Node Setup (3 Nodes Online)
+### Nodes
 
-| Node | IP Address | Device Name | Status |
-|------|------------|-------------|--------|
-| Node-1 | 192.168.0.251 | RailCmd-Node-1 | Online |
-| Node-2 | 192.168.0.252 | RailCmd-Node-2 | Online |
-| Node-3 | 192.168.0.253 | RailCmd-Node-3 | Online |
+| Node | IP | Device name | Zone | Role |
+|------|----|--|---|---|
+| Node-1 | 192.168.0.251 | RailCmd-Node-1 | Downtown / Station | Station hall, Platform lamp, Ticket booth, Clock tower, Cafe window, Billboard |
+| Node-2 | 192.168.0.252 | RailCmd-Node-2 | Upper Level / Construction | Fire-station bay, Site floodlight, Crane warning, Site office, Emergency beacon, Barricade LED |
+| Node-3 | 192.168.0.253 | RailCmd-Node-3 | Lower Level / Mansion | Mansion porch, Mansion window, Police station, Police beacon, Coffee-shop sign, Garden lamp |
 
-### What's Working
-- **3 ESP32-C3 nodes** with synchronized displays
-- ESP32-C3 firmware with 7 display screens (WiFi, BLE, Trains, Schedule, Stats, News, Weather)
-- OLED display using U8G2 library (software I2C on GPIO5/6)
-- **Static IP assignment** per node (251, 252, 253)
-- WiFi AP mode for configuration + Station mode for network connection
-- BLE for mobile configuration
-- **WebSocket server on each ESP32** (ESPAsyncWebServer on port 81)
-- **Python connects as WebSocket client** to all 3 ESP32s for real-time push updates
-- HTTP polling as fallback (trains, schedule, news, weather - every 10 seconds)
-- HTTP status reporting to API
-- Web interface on ESP32 for configuration
-- API server with train control, schedule, news, weather, and node management
-- Dashboard with train controls at http://192.168.0.177:5000
-- Live news headlines from BBC RSS feed (auto-refreshes every 5 minutes)
-- Live weather data from wttr.in API (auto-refreshes every 5 minutes)
-- Animated boot screen with train and smoke puffs (positioned at Y+26)
-- Screen transitions with icons showing next screen name
-- Smooth scrolling for long news headlines
+### What's working
+- 3 ESP32-C3 nodes with static IPs and OLED displays
+- WiFi (AP+STA), BLE config, 7 display screens, animated boot
+- WebSocket server on each ESP32 (port 81, `/ws`) — Pi connects as client
+- HTTP server on each (port 80) — see endpoints below
+- HTTP polling fallback for trains/schedule/weather/news every ~10 s
+- Status heartbeat (POST `/api/esp32/status`) every 5 s
+- **NEW:** 6 house LED driver pins per node (GPIO 0/1/3/4/7/10), each
+  switches a 2N3904 → LED to light a scenery building
 
-### Architecture
-The WebSocket connection uses an inverted architecture with multi-node support:
-- **Each ESP32 runs WebSocket SERVER** on port 81 at `/ws` endpoint using ESPAsyncWebServer
-- **Python Flask server connects as WebSocket CLIENT** to all 3 ESP32s:
-  - `ws://192.168.0.251:81/ws` (Node-1)
-  - `ws://192.168.0.252:81/ws` (Node-2)
-  - `ws://192.168.0.253:81/ws` (Node-3)
-- Updates are broadcast to all connected nodes simultaneously
-- Each node has its own connection thread for reliability
+### Hardware setup
 
-### Known Issues
-- None currently - All 3 nodes connected and synchronized
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| OLED SDA | 5 | Software I²C to SSD1306 |
+| OLED SCL | 6 | |
+| Status LED | 8 | On-board, reserved |
+| BOOT button | 9 | Short = cycle screen, long = reset WiFi |
+| House LED 0 | 0 | 2N3904 low-side driver → scenery LED |
+| House LED 1 | 1 | ditto |
+| House LED 2 | 3 | |
+| House LED 3 | 4 | |
+| House LED 4 | 7 | |
+| House LED 5 | 10 | |
 
-### Hardware Setup
-- **Board:** ESP32-C3 SuperMini (x3)
-- **Display:** SSD1306 OLED 128x64 (72x40 visible area)
-  - Visible area offset: X=30, Y=12
-  - Content must be drawn within X:30-102, Y:12-52
-  - Center X = 66 (X + 36)
-- **I2C Pins:** SDA=GPIO5, SCL=GPIO6
-- **LED:** GPIO8
-- **Button:** GPIO9 (BOOT button for screen cycling)
+Each driver: GPIO → 1 kΩ → 2N3904 base; LED anode → 220 Ω → node 3V3 pin;
+LED cathode → 2N3904 collector; emitter → GND. GPIO HIGH turns the LED on.
+All six emitters bus to the node GND, which **must** tie back to the
+main system ground (Pi Pin 34 / 12 V−) or the "off" state will glow.
 
-### Network
-| Device | IP Address |
-|--------|------------|
-| Node-1 | 192.168.0.251 |
-| Node-2 | 192.168.0.252 |
-| Node-3 | 192.168.0.253 |
-| API Server | 192.168.0.177:5000 |
+Each node pulls ~110 mA @ 5 V with all LEDs on — well under a USB-C
+charger's budget.
 
-**WiFi AP SSIDs for configuration:**
-- Node-1: `RailCmd-Node-1` (password: 12345678)
-- Node-2: `RailCmd-Node-2` (password: 12345678)
-- Node-3: `RailCmd-Node-3` (password: 12345678)
+### Display — SSD1306 128×64 (72×40 visible)
+- Visible area offset: X=30, Y=12
+- Content must stay within X:30-102, Y:12-52
+- Center X = 66
 
 ---
 
-## File Locations
+## API
 
-### ESP32 Firmware
-```
-/Users/punitmishra/Downloads/esp32-firmware/
-├── platformio.ini          # PlatformIO config with U8G2 & WebSockets
-├── src/
-│   └── main.cpp            # Main firmware code
-└── CHECKPOINT.md           # This file
-```
+### Node-side HTTP (each node, port 80)
 
-### API Server
-```
-/Users/punitmishra/Downloads/railcommand-api/
-├── app.py                  # Flask API with WebSocket support
-└── requirements.txt        # Python dependencies
-```
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/` | GET | Config landing page |
+| `/save` | POST | Save WiFi credentials, reboots |
+| `/api/status` | GET | Device info + LED state array |
+| `/api/trains` | GET | Last-fetched train data (cached) |
+| `/api/led` | GET | Returns `{"leds":[bool;6]}` |
+| `/api/led/<n>/<on\|off>` | POST | Drive one building LED |
+| `/reboot` | GET | Reboot this node |
 
-### TypeScript API Client (Reference)
-```
-/Users/punitmishra/Downloads/railroad-api.ts   # API type definitions
-```
+### Node-side WebSocket (port 81, `/ws`)
+
+Server endpoint; the Pi connects as the client. Messages are JSON with
+a `cmd` field:
+- `set_screen` — jump to a specific screen (0–6)
+- `train_update`, `weather_update`, `news_update`, `schedule_update` —
+  push a slice of state to this node without a round-trip HTTP fetch
+
+### Pi API endpoints the firmware uses
+
+Running on the Pi at `http://192.168.0.165:5000` (change `API_HOST` in
+`src/main.cpp` if the Pi's IP moves — put a DHCP reservation on the
+router). Each is exposed by the Rust `train-controller`:
+
+| Pi route | Method | Firmware consumer |
+|---|---|---|
+| `/api/esp32/status` | POST | heartbeat ingest |
+| `/api/trains` | GET | `fetchTrainsHTTP()` |
+| `/api/schedule` | GET | `fetchScheduleHTTP()` |
+| `/api/weather` | GET | `fetchWeatherHTTP()` |
+| `/api/news` | GET | `fetchNewsHTTP()` |
+
+The Pi also pushes commands *to* each node:
+| Pi → node | Purpose |
+|---|---|
+| `POST http://<node-ip>/api/led/<n>/<on\|off>` | drive one building LED |
 
 ---
 
-## How to Run
+## Build & flash
 
-### 1. Start API Server
 ```bash
-cd /Users/punitmishra/Downloads/railcommand-api
-pip3 install -r requirements.txt  # First time only
-python3 app.py
+# Build and flash each node (USB cable)
+cd esp32-firmware
+python3 -m platformio run -t upload -e node1   # Node-1 .251
+python3 -m platformio run -t upload -e node2   # Node-2 .252
+python3 -m platformio run -t upload -e node3   # Node-3 .253
+
+# Then OTA (same WiFi, no cable)
+python3 -m platformio run -t upload -e node1_ota
 ```
 
-### 2. Build & Upload ESP32 Firmware (Multi-Node)
+Serial monitor: `python3 -m platformio device monitor`
+
+### First-boot WiFi config
+1. Connect to the AP `RailCmd-Node-X` (password `12345678`)
+2. Open `http://192.168.4.1`
+3. Enter SSID + password, save → node reboots with its static IP
+
+---
+
+## Changelog since last checkpoint
+
+- **2026-11-25** — Added house LED drivers. `HOUSE_PINS[6]` on GPIO 0/1/3/4/7/10 initialised LOW in `setup()`. New routes `GET /api/led` and `POST /api/led/<n>/<on|off>` via `server.onNotFound` as a path-param router. `/api/status` now includes `led_count` + `leds` array for the Pi to audit. API_HOST updated from `192.168.0.177` (old Flask stub) to `192.168.0.165` (Pi running the Rust train-controller).
+
+---
+
+## Verification (post-flash)
+
 ```bash
-cd /Users/punitmishra/Downloads/esp32-firmware
+# Node online check
+for n in 251 252 253; do curl -s http://192.168.0.$n/api/status | python3 -m json.tool | head -12; echo "---"; done
 
-# Upload to Node-1 (IP: 192.168.0.251)
-python3 -m platformio run -t upload -e node1
+# Drive LED 0 on Node-1 (Station hall) directly
+curl -X POST http://192.168.0.251/api/led/0/on
+curl -X POST http://192.168.0.251/api/led/0/off
 
-# Upload to Node-2 (IP: 192.168.0.252)
-python3 -m platformio run -t upload -e node2
+# Drive via the Pi (what the dashboard does)
+curl -X POST http://192.168.0.165:5000/api/houses/1/0/on
+curl -X POST http://192.168.0.165:5000/api/houses/scene/evening
 
-# Upload to Node-3 (IP: 192.168.0.253)
-python3 -m platformio run -t upload -e node3
+# Heartbeats arriving at the Pi?
+curl http://192.168.0.165:5000/api/nodes | python3 -m json.tool
+# → each node's online=true within 15 s of booting
 ```
-
-### 3. Configure WiFi on New Nodes
-1. Connect to AP: `RailCmd-Node-X` (password: `12345678`)
-2. Open http://192.168.4.1
-3. Enter WiFi credentials and save
-4. Device reboots with static IP
-
-### 4. Monitor Serial Output
-```bash
-python3 -m platformio device monitor
-```
-
----
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Dashboard with train controls |
-| `/ws` | WebSocket | Plain WebSocket for ESP32 |
-| `/api/trains` | GET | Get all trains |
-| `/api/trains/<idx>` | POST | Control train (speed, direction) |
-| `/api/trains/all/stop` | POST | Emergency stop all |
-| `/api/schedule` | GET | Get schedule |
-| `/api/news` | GET/POST | Get or update news headlines |
-| `/api/weather` | GET/POST | Get or update weather data |
-| `/api/esp32/status` | POST | ESP32 status updates |
-| `/api/nodes` | GET | Get connected ESP32 nodes |
-
-### Example API Calls
-```bash
-# Get trains
-curl http://192.168.0.177:5000/api/trains
-
-# Start train at 50% forward
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"speed": 50, "direction": "forward"}' \
-  http://192.168.0.177:5000/api/trains/0
-
-# Emergency stop
-curl -X POST http://192.168.0.177:5000/api/trains/all/stop
-
-# Get news headlines
-curl http://192.168.0.177:5000/api/news
-
-# Get weather
-curl http://192.168.0.177:5000/api/weather
-
-# Manually set weather (if API is down)
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"condition": "sunny", "temp": 22, "humidity": 45, "location": "Home"}' \
-  http://192.168.0.177:5000/api/weather
-
-# Check ESP32 status
-curl http://192.168.0.253/api/status
-
-# Get connected ESP32 nodes
-curl http://192.168.0.177:5000/api/nodes
-```
-
----
-
-## WebSocket Message Format
-
-**Connection Flow:**
-1. ESP32 starts WebSocket server on port 81
-2. Python connects as client to `ws://192.168.0.253:81/ws`
-3. ESP32 sends `register` message with device info
-4. Python responds with initial train/schedule/news/weather data
-5. Python pushes updates whenever data changes
-
-### Python → ESP32 (via WebSocket client)
-
-**Train Update:**
-```json
-{
-  "type": "train_update",
-  "trains": [
-    {"name": "Express 1", "speed": 50, "direction": "forward", "active": true}
-  ]
-}
-```
-
-**Schedule Update:**
-```json
-{
-  "type": "schedule_update",
-  "schedule": [
-    {"time": "10:30", "train": "Express", "dest": "Central", "platform": 1}
-  ]
-}
-```
-
-**News Update:**
-```json
-{
-  "type": "news_update",
-  "news": [
-    {"headline": "Breaking news headline here", "source": "BBC News"}
-  ]
-}
-```
-
-**Weather Update:**
-```json
-{
-  "type": "weather_update",
-  "condition": "clear",
-  "temp": 9,
-  "humidity": 80,
-  "location": "San Jose"
-}
-```
-
-**Commands:**
-```json
-{"type": "command", "cmd": "reboot"}
-{"type": "command", "cmd": "screen", "screen": 2}
-```
-
-### ESP32 → Server
-
-**Registration:**
-```json
-{"type": "register", "device": "ESP32-C3-F610", "ip": "192.168.0.253"}
-```
-
----
-
-## Display Screens (Auto-cycles, button to skip)
-
-| Screen | Duration | Content |
-|--------|----------|---------|
-| 1. WiFi | 4 sec | Network status, IP address, online/offline |
-| 2. BLE | 4 sec | Bluetooth status, device name, paired count |
-| 3. Trains | 4 sec | Active trains with direction (>>/<<) and speed % |
-| 4. Schedule | 4 sec | Departure time, destination, platform |
-| 5. Stats | 4 sec | Memory usage % and uptime |
-| 6. News | 6 sec | BBC headlines with smooth scrolling |
-| 7. Weather | 6 sec | Temperature, humidity, condition with icon |
-
-**Features:**
-- Animated train boot screen with smoke puffs and decorative lines
-- Clean WiFi connecting animation with progress bar
-- Slide-in transition animations showing icon + name
-- All icons properly centered using `X + 36 - ICON_W/2` formula
-- Consistent layout: icon at Y+12, title at Y+30, content at Y+38/Y+46
-- Smooth horizontal scrolling for long news headlines
-- Weather icons (sun/cloud) based on conditions
-- News/Weather screens stay longer (6 sec) for readability
-
-**Screen Positioning (Y offsets from visible area top):**
-- Y+12: Icon position (12px margin from top of visible area)
-- Y+30: Title text baseline
-- Y+38: Content line 1 baseline
-- Y+46: Content line 2 baseline
-
-**Visible Area Coordinates:**
-- Display: 128x64 pixels total
-- Visible window: 72x40 pixels
-- X offset: 30 (visible X range: 30-101)
-- Y offset: 12 (visible Y range: 12-51)
-- Center X: X + 36 = 66
-
-**Custom Icons (XBM format):**
-- WiFi: 12x10 - signal arcs
-- Bluetooth: 8x10 - classic B symbol
-- Train: 14x9 - locomotive with wheels
-- Clock: 10x10 - round clock with hands
-- Stats: 10x9 - bar chart with trend
-- News: 10x9 - newspaper with lines
-- Sun: 11x11 - sun with rays
-- Cloud: 12x8 - fluffy cloud
-
----
-
-## Configuration
-
-### ESP32 WiFi Setup (Per Node)
-1. Connect to AP: `RailCmd-Node-X` (password: `12345678`)
-   - Node-1: `RailCmd-Node-1`
-   - Node-2: `RailCmd-Node-2`
-   - Node-3: `RailCmd-Node-3`
-2. Open http://192.168.4.1
-3. Enter your WiFi credentials and save
-4. Device reboots and connects with static IP
-
-### Node Configuration (platformio.ini)
-Each node is configured via build environment:
-```ini
-[env:node1]  # IP: 192.168.0.251
-build_flags = ${env.build_flags} -DNODE_ID=1
-
-[env:node2]  # IP: 192.168.0.252
-build_flags = ${env.build_flags} -DNODE_ID=2
-
-[env:node3]  # IP: 192.168.0.253
-build_flags = ${env.build_flags} -DNODE_ID=3
-```
-
-### Change API Server IP
-Edit `/Users/punitmishra/Downloads/esp32-firmware/src/main.cpp`:
-```cpp
-#define API_HOST "192.168.0.177"  // Change to your server IP
-#define API_PORT 5000
-```
-
-### Add More Nodes
-1. Edit `platformio.ini` - add new `[env:nodeX]` with `NODE_ID=X`
-2. Edit `src/main.cpp` - add new `#elif NODE_ID == X` block with IP
-3. Edit `app.py` - add new entry to `ESP32_NODES` list
-
----
-
-## Key Code Sections
-
-### main.cpp Structure (~1100 lines)
-- Lines 1-35: Includes and configuration constants
-- Lines 36-130: Custom XBM icons (WiFi, BLE, Train, Clock, Stats, News, Sun, Cloud)
-- Lines 132-185: U8G2 display, data structures (Train, Schedule, News, Weather)
-- Lines 187-210: State variables and timing constants
-- Lines 212-230: Drawing helpers (signal bars, progress bar)
-- Lines 232-275: BLE callbacks
-- Lines 277-390: WebSocket event handling and message parsing
-- Lines 392-435: API communication functions
-- Lines 437-565: Setup functions (OLED boot animation, WiFi connecting screens)
-- Lines 567-745: BLE setup, credentials, web server
-- Lines 747-810: Animation helpers (trains, dots, speed bars, scrolling text)
-- Lines 812-1020: Display screen rendering (all 7 screens + centered transitions)
-- Lines 1022-1105: Main setup() and loop() with auto-cycling logic
-
-### app.py Structure (~607 lines)
-- Lines 28-36: RSS feed configuration
-- Lines 38-95: Background updater thread (news from BBC, weather from wttr.in)
-- Lines 101-116: Demo train/schedule data
-- Lines 121-231: Plain WebSocket handler for ESP32
-- Lines 236-341: Train control and news/weather API endpoints
-- Lines 347-402: ESP32 node management API
-- Lines 407-552: Dashboard HTML template
-- Lines 557-589: Socket.IO events for browser clients
-
----
-
-## Data Sources
-
-### News
-- **Source:** BBC World News RSS Feed
-- **URL:** `https://feeds.bbci.co.uk/news/world/rss.xml`
-- **Refresh:** Every 5 minutes (background thread)
-- **Display:** Top 3 headlines, cycles every 4 seconds, smooth scroll for long text
-
-### Weather
-- **Source:** wttr.in API
-- **URL:** `https://wttr.in/?format=j1`
-- **Refresh:** Every 5 minutes (background thread)
-- **Display:** Temperature, humidity, condition with sun/cloud icon
-
----
-
-## Future Work / Ideas
-
-- [ ] Add actual train control hardware (motor drivers, PWM)
-- [ ] Reed switch integration for position detection
-- [ ] BMP280 sensor for temperature/pressure display
-- [x] **Multiple ESP32 nodes at different locations** ✓ (3 nodes working!)
-- [ ] Mobile app using BLE for local control
-- [ ] Schedule automation (timed train runs)
-- [ ] Camera integration for monitoring
-- [ ] Sound effects via API
-- [ ] OTA firmware updates
 
 ---
 
 ## Troubleshooting
 
-### Display not working
-- Check I2C wiring: SDA→GPIO5, SCL→GPIO6
-- Verify 3.3V power to display
-- Software I2C is used (no Wire.begin needed)
+### Node not joining WiFi
+- Long-press BOOT button → clears stored credentials, reverts to AP mode
+- Serial monitor during boot shows the connection attempt
 
-### WebSocket not connecting
-- Verify API server is running: `curl http://192.168.0.177:5000/api/trains`
-- Check ESP32 is on same network: `curl http://192.168.0.253/api/status`
-- Verify API_HOST in main.cpp matches server IP
+### Can't reach Pi API
+- Confirm `API_HOST` in `src/main.cpp` matches `hostname -I` on the Pi
+- `curl -v http://<pi-ip>:5000/api/status` from your laptop — if it
+  returns JSON, the Pi API is up and the node just needs to re-fetch
 
 ### Build errors
-- Run `pio pkg update` to update libraries
+- `pio pkg update` to refresh libraries
 - Clean build: `pio run -t clean && pio run`
+- If `server.onNotFound` doesn't compile on an older WebServer: check
+  `WebServer` library version in `platformio.ini`
+
+### LED stuck on at boot
+- GPIO 0/2/3 are strap pins on ESP32-C3. GPIO 0 and 3 may glow for ~50
+  ms during reset — expected, ignore.
+- If the LED stays on permanently, double-check your 2N3904 collector
+  is on the LED cathode, not the anode.
 
 ---
 
-## Session Commands Used
+## Related repos
 
-```bash
-# Build and upload firmware (multi-node)
-python3 -m platformio run -t upload -e node1  # Node-1 @ 192.168.0.251
-python3 -m platformio run -t upload -e node2  # Node-2 @ 192.168.0.252
-python3 -m platformio run -t upload -e node3  # Node-3 @ 192.168.0.253
-
-# Start API server (runs on port 5000)
-cd /Users/punitmishra/Downloads/railcommand-api && python3 app.py
-
-# Start API server in background
-cd /Users/punitmishra/Downloads/railcommand-api && nohup python3 app.py > /tmp/railcommand.log 2>&1 &
-
-# Monitor serial output
-python3 -m platformio device monitor
-
-# Test API endpoints
-curl http://192.168.0.177:5000/api/trains
-curl http://192.168.0.177:5000/api/news
-curl http://192.168.0.177:5000/api/weather
-curl http://192.168.0.177:5000/api/nodes
-
-# Check individual nodes
-curl http://192.168.0.251/api/status  # Node-1
-curl http://192.168.0.252/api/status  # Node-2
-curl http://192.168.0.253/api/status  # Node-3
-
-# View API server logs
-tail -f /tmp/railcommand.log
-```
+- **Pi controller:** github.com/punitmishra/pi-railroad-control (Rust
+  actix-web API, CPX firmware, SVG wiring diagrams, CHECKS.md)
+- **This repo:** github.com/punitmishra/esp32-firmware (PlatformIO,
+  Arduino framework, ESP32-C3)
