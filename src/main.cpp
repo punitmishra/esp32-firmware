@@ -917,22 +917,41 @@ void setupWebServer() {
   // use server.onNotFound() as a one-line router for this URL family.
   server.onNotFound([]() {
     String uri = server.uri();
-    // Expect "/api/led/<n>/<state>"
+    // Everything else: honest 404.
     if (!uri.startsWith("/api/led/")) {
       server.send(404, "application/json", "{\"error\":\"not found\"}");
       return;
     }
+    // Only POST mutates state — GETs on a non-registered /api/led/ path
+    // get a method-not-allowed, never a toggle.
+    if (server.method() != HTTP_POST) {
+      server.send(405, "application/json", "{\"error\":\"method not allowed — POST only\"}");
+      return;
+    }
+    // Expect "/api/led/<n>/<state>"
     int firstSlash = uri.indexOf('/', 9);
     if (firstSlash < 0) {
       server.send(400, "application/json", "{\"error\":\"expected /api/led/<n>/<state>\"}");
       return;
     }
-    int n = uri.substring(9, firstSlash).toInt();
-    String state = uri.substring(firstSlash + 1);
+    String idxStr = uri.substring(9, firstSlash);
+    if (idxStr.length() == 0) {
+      server.send(400, "application/json", "{\"error\":\"missing led index\"}");
+      return;
+    }
+    // toInt() silently returns 0 on non-numeric input; reject explicitly.
+    for (size_t i = 0; i < idxStr.length(); i++) {
+      if (!isDigit(idxStr[i])) {
+        server.send(400, "application/json", "{\"error\":\"led index must be numeric\"}");
+        return;
+      }
+    }
+    int n = idxStr.toInt();
     if (n < 0 || n >= HOUSE_LED_COUNT) {
       server.send(400, "application/json", "{\"error\":\"led index out of range\"}");
       return;
     }
+    String state = uri.substring(firstSlash + 1);
     bool on;
     if      (state == "on"  || state == "1" || state == "true")  on = true;
     else if (state == "off" || state == "0" || state == "false") on = false;
